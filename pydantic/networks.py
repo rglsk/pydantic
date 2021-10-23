@@ -383,7 +383,7 @@ class FileUrl(AnyUrl):
     host_required = False
 
 
-class PostgresDsn(AnyMultiHostUrl):
+class PostgresDsn(AnyUrl):
     allowed_schemes = {
         'postgres',
         'postgresql',
@@ -396,7 +396,7 @@ class PostgresDsn(AnyMultiHostUrl):
     }
     user_required = True
 
-    __slots__ = 'hosts',
+    __slots__ = ('hosts',)
 
     def __init__(self, *args, hosts: Optional[List['HostParts']] = None, **kwargs):
         super().__init__(*args, **kwargs)
@@ -443,15 +443,15 @@ class PostgresDsn(AnyMultiHostUrl):
                     'host_type': host_type,
                     'tld': tld,
                     'rebuild': rebuild,
-                    'port': original_parts.get('port')
-                }
+                    'port': original_parts.get('port'),
+                },
             )
             host_parts = cls.validate_host_parts(host_parts)
             hosts_parts.append(host_parts)
         return hosts_parts
 
     @classmethod
-    def validate(cls, value: Any, field: 'ModelField', config: 'BaseConfig') -> 'AnyMultiHostUrl':
+    def validate(cls, value: Any, field: 'ModelField', config: 'BaseConfig') -> 'PostgresDsn':
         if value.__class__ == cls:
             return value
         value = str_validator(value)
@@ -466,14 +466,14 @@ class PostgresDsn(AnyMultiHostUrl):
         original_parts = cast('Parts', m.groupdict())
         parts = cls.validate_parts(original_parts)
 
-        hosts = m.groupdict()["hosts"]
+        hosts = m.groupdict()['hosts']
         if hosts is None and cls.host_required:
             raise errors.UrlHostError()
 
-        hosts_parts = cls.validate_multi_host(hosts.split(","))
+        hosts_parts = cls.validate_multi_host(hosts.split(','))
 
         if m.end() != len(url):
-            raise errors.UrlExtraError(extra=url[m.end():])
+            raise errors.UrlExtraError(extra=url[m.end() :])
 
         if len(hosts_parts) > 1:
             return cls(
@@ -485,13 +485,13 @@ class PostgresDsn(AnyMultiHostUrl):
                 query=parts['query'],
                 fragment=parts['fragment'],
                 host_type=None,
-                hosts=hosts_parts
+                hosts=hosts_parts,
             )
 
         # Keep the back compatibility with single host
         _host_part = hosts_parts[0]
         return cls(
-            None if _host_part["rebuild"] else url,
+            None if _host_part['rebuild'] else url,
             scheme=parts['scheme'],
             user=parts['user'],
             password=parts['password'],

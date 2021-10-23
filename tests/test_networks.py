@@ -467,10 +467,7 @@ def test_multihost_postgres_dsns():
         a: PostgresDsn
 
     any_multihost_url = Model(a='schema://user:pass@host1.db.net:4321,host2.db.net:6432/app').a
-    assert (
-        any_multihost_url
-        == 'schema://user:pass@host1.db.net:4321,host2.db.net:6432/app'
-    )
+    assert any_multihost_url == 'schema://user:pass@host1.db.net:4321,host2.db.net:6432/app'
     assert any_multihost_url.scheme == 'schema'
     assert any_multihost_url.host is None
     assert any_multihost_url.host_type is None
@@ -478,20 +475,8 @@ def test_multihost_postgres_dsns():
     assert any_multihost_url.port is None
     assert any_multihost_url.path == '/app'
     assert any_multihost_url.hosts == [
-        {
-            'host': 'host1.db.net',
-            'port': '4321',
-            'tld': 'net',
-            'host_type': 'domain',
-            'rebuild': False
-        },
-        {
-            'host': 'host2.db.net',
-            'port': '6432',
-            'tld': 'net',
-            'host_type': 'domain',
-            'rebuild': False
-        }
+        {'host': 'host1.db.net', 'port': '4321', 'tld': 'net', 'host_type': 'domain', 'rebuild': False},
+        {'host': 'host2.db.net', 'port': '6432', 'tld': 'net', 'host_type': 'domain', 'rebuild': False},
     ]
 
     any_multihost_url = Model(a='schema://user:pass@host.db.net:4321/app').a
