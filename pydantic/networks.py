@@ -15,6 +15,7 @@ from typing import (
     Dict,
     FrozenSet,
     Generator,
+    List,
     Optional,
     Pattern,
     Set,
@@ -51,6 +52,12 @@ if TYPE_CHECKING:
         query: Optional[str]
         fragment: Optional[str]
 
+    class HostParts(TypedDict, total=False):
+        host: str
+        tld: Optional[str]
+        host_type: Optional[str]
+        port: Optional[str]
+
 
 else:
     email_validator = None
@@ -75,8 +82,19 @@ __all__ = [
 ]
 
 _url_regex_cache = None
+_host_regex_cache = None
+_postgres_url_regex_cache = None
 _ascii_domain_regex_cache = None
 _int_domain_regex_cache = None
+
+_host_regex = (
+    r'(?:'
+    r'(?P<ipv4>(?:\d{1,3}\.){3}\d{1,3})(?=$|[/:#?])|'  # ipv4
+    r'(?P<ipv6>\[[A-F0-9]*:[A-F0-9:]+\])(?=$|[/:#?])|'  # ipv6
+    r'(?P<domain>[^\s/:?#]+)'  # domain, validation occurs later
+    r')?'
+    r'(?::(?P<port>\d+))?'  # port
+)
 
 
 def url_regex() -> Pattern[str]:
@@ -85,18 +103,45 @@ def url_regex() -> Pattern[str]:
         _url_regex_cache = re.compile(
             r'(?:(?P<scheme>[a-z][a-z0-9+\-.]+)://)?'  # scheme https://tools.ietf.org/html/rfc3986#appendix-A
             r'(?:(?P<user>[^\s:/]*)(?::(?P<password>[^\s/]*))?@)?'  # user info
-            r'(?:'
-            r'(?P<ipv4>(?:\d{1,3}\.){3}\d{1,3})(?=$|[/:#?])|'  # ipv4
-            r'(?P<ipv6>\[[A-F0-9]*:[A-F0-9:]+\])(?=$|[/:#?])|'  # ipv6
-            r'(?P<domain>[^\s/:?#]+)'  # domain, validation occurs later
-            r')?'
-            r'(?::(?P<port>\d+))?'  # port
+            rf'{_host_regex}'  # hosts
             r'(?P<path>/[^\s?#]*)?'  # path
             r'(?:\?(?P<query>[^\s#]*))?'  # query
             r'(?:#(?P<fragment>[^\s#]*))?',  # fragment
             re.IGNORECASE,
         )
     return _url_regex_cache
+
+
+def host_regex() -> Pattern[str]:
+    global _host_regex_cache
+    if _host_regex_cache is None:
+        _host_regex_cache = re.compile(
+            _host_regex,
+            re.IGNORECASE,
+        )
+    return _host_regex_cache
+
+
+def postgres_url_regex() -> Pattern[str]:
+    global _postgres_url_regex_cache
+    if _postgres_url_regex_cache is None:
+        _postgres_url_regex_cache = re.compile(
+            r'(?:(?P<scheme>[a-z][a-z0-9+\-.]+)://)?'  # scheme https://tools.ietf.org/html/rfc3986#appendix-A
+            r'(?:(?P<user>[^\s:/]*)(?::(?P<password>[^\s/]*))?@)?'  # user info
+            r'(?:'
+            r'(?P<hosts>('  # hosts, validation occurs later
+            r'([(?:\d{1,3}\.){3}\d{1,3})(?=$|[/:#?])]|'  # ipv4
+            r'([\[[A-F0-9]*:[A-F0-9:]+\])(?=$|[/:#?])]|'  # ipv6
+            r'([^\s+:?#/]+)'  # domain
+            r'(?::(\d+))?'  # port
+            r',?)+)'
+            r')?'
+            r'(?P<path>/[^\s/?#]*)?'  # path
+            r'(?:\?(?P<query>[^\s#]*))?'  # query
+            r'(?:#(?P<fragment>[^\s#]*))?',  # fragment
+            re.IGNORECASE,
+        )
+    return _postgres_url_regex_cache
 
 
 def ascii_domain_regex() -> Pattern[str]:
@@ -338,7 +383,7 @@ class FileUrl(AnyUrl):
     host_required = False
 
 
-class PostgresDsn(AnyUrl):
+class PostgresDsn(AnyMultiHostUrl):
     allowed_schemes = {
         'postgres',
         'postgresql',
@@ -350,6 +395,114 @@ class PostgresDsn(AnyUrl):
         'postgresql+pygresql',
     }
     user_required = True
+
+    __slots__ = 'hosts',
+
+    def __init__(self, *args, hosts: Optional[List['HostParts']] = None, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.hosts = hosts
+
+    @classmethod
+    def validate_parts(cls, parts: 'Parts') -> 'Parts':
+        scheme = parts['scheme']
+        if scheme is None:
+            raise errors.UrlSchemeError()
+
+        if cls.allowed_schemes and scheme.lower() not in cls.allowed_schemes:
+            raise errors.UrlSchemePermittedError(cls.allowed_schemes)
+
+        user = parts['user']
+        if cls.user_required and user is None:
+            raise errors.UrlUserInfoError()
+
+        return parts
+
+    @classmethod
+    def validate_host_parts(cls, parts: 'HostParts') -> 'HostParts':
+        """
+        A method used to validate parts of an URL.
+        Could be overridden to set default values for parts if missing
+        """
+        port = parts['port']
+        if port is not None and int(port) > 65_535:
+            raise errors.UrlPortError()
+
+        return parts
+
+    @classmethod
+    def validate_multi_host(cls, hosts: List[str]) -> List['HostParts']:
+        hosts_parts: List['HostParts'] = []
+        for host in hosts:
+            hm = host_regex().match(host)
+            original_parts = cast('Parts', hm.groupdict())
+            host, tld, host_type, rebuild = cls.validate_host(original_parts)
+            host_parts = cast(
+                'HostParts',
+                {
+                    'host': host,
+                    'host_type': host_type,
+                    'tld': tld,
+                    'rebuild': rebuild,
+                    'port': original_parts.get('port')
+                }
+            )
+            host_parts = cls.validate_host_parts(host_parts)
+            hosts_parts.append(host_parts)
+        return hosts_parts
+
+    @classmethod
+    def validate(cls, value: Any, field: 'ModelField', config: 'BaseConfig') -> 'AnyMultiHostUrl':
+        if value.__class__ == cls:
+            return value
+        value = str_validator(value)
+        if cls.strip_whitespace:
+            value = value.strip()
+        url: str = cast(str, constr_length_validator(value, field, config))
+
+        m = postgres_url_regex().match(url)
+        # the regex should always match, if it doesn't please report with details of the URL tried
+        assert m, 'URL regex failed unexpectedly'
+
+        original_parts = cast('Parts', m.groupdict())
+        parts = cls.validate_parts(original_parts)
+
+        hosts = m.groupdict()["hosts"]
+        if hosts is None and cls.host_required:
+            raise errors.UrlHostError()
+
+        hosts_parts = cls.validate_multi_host(hosts.split(","))
+
+        if m.end() != len(url):
+            raise errors.UrlExtraError(extra=url[m.end():])
+
+        if len(hosts_parts) > 1:
+            return cls(
+                None if any([hp['rebuild'] for hp in hosts_parts]) else url,
+                scheme=parts['scheme'],
+                user=parts['user'],
+                password=parts['password'],
+                path=parts['path'],
+                query=parts['query'],
+                fragment=parts['fragment'],
+                host_type=None,
+                hosts=hosts_parts
+            )
+
+        # Keep the back compatibility with single host
+        _host_part = hosts_parts[0]
+        return cls(
+            None if _host_part["rebuild"] else url,
+            scheme=parts['scheme'],
+            user=parts['user'],
+            password=parts['password'],
+            host=_host_part['host'],
+            tld=_host_part['tld'],
+            host_type=_host_part['host_type'],
+            port=_host_part.get('port'),
+            path=parts['path'],
+            query=parts['query'],
+            fragment=parts['fragment'],
+        )
 
 
 class RedisDsn(AnyUrl):
